@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif;
+    color: #1a1a1a;
+    font-size: 12px;
+    margin: 0;
+  }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  h2 { font-size: 17px; margin: 24px 0 8px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  h3 { font-size: 14px; margin: 16px 0 6px; }
+  .title-page { min-height: 90vh; display: flex; flex-direction: column; justify-content: center; }
+  .title-page .meta { margin-top: 20px; line-height: 1.8; }
+  .uik-page { break-before: page; }
+  .stat-grid { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0 16px; }
+  .stat-box { border: 1px solid #ddd; border-radius: 6px; padding: 8px 12px; min-width: 140px; }
+  .stat-box .label { font-size: 10px; color: #666; }
+  .stat-box .value { font-size: 16px; font-weight: 600; }
+  .charts { display: flex; flex-direction: column; gap: 6px; }
+  .signal-list { list-style: none; padding: 0; margin: 8px 0; }
+  .signal-list li { padding: 6px 8px; border-left: 3px solid #d97706; background: #fffaf0; margin-bottom: 6px; font-size: 11px; }
+  .hypothesis { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; break-inside: avoid; }
+  .hypothesis h3 { margin-top: 0; }
+  .confidence { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 10px; color: #fff; }
+  .confidence-low { background: #9ca3af; }
+  .confidence-medium { background: #d97706; }
+  .confidence-high { background: #b91c1c; }
+  .evidence-list, .alt-list, .verify-list { margin: 6px 0; padding-left: 18px; }
+  .summary-block { background: #f3f4f6; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; }
+  .sources-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+  .sources-table th, .sources-table td { border: 1px solid #ddd; padding: 4px 6px; text-align: left; vertical-align: top; }
+  .disclaimer { font-size: 10px; color: #666; margin-top: 4px; }
+  .empty { color: #888; font-style: italic; }
+</style>
+</head>
+<body>
+
+  <section class="title-page">
+    <h1>Отчёт по наблюдению за выборами</h1>
+    <div class="meta">
+      <div>Сформирован: {{dt generatedAt}}</div>
+      <div>Период данных: {{dt period.from}} — {{dt period.to}}</div>
+      <div>Количество УИК в отчёте: {{uikCount}}</div>
+      <div>Наблюдений (observations): {{totalObservations}}</div>
+      <div>Числовых срезов (snapshots): {{totalSnapshots}}</div>
+    </div>
+  </section>
+
+  {{#each pages}}
+  <section class="uik-page">
+    <h1>УИК №{{uik}}</h1>
+
+    <h2>1. Разведывательный анализ</h2>
+    <div class="stat-grid">
+      <div class="stat-box"><div class="label">Период</div><div class="value">{{dt period.from}} — {{dt period.to}}</div></div>
+      <div class="stat-box"><div class="label">Наблюдателей</div><div class="value">{{observerCount}}</div></div>
+      <div class="stat-box"><div class="label">Сообщений-наблюдений</div><div class="value">{{observationCount}}</div></div>
+      <div class="stat-box"><div class="label">Числовых срезов</div><div class="value">{{snapshotCount}}</div></div>
+      <div class="stat-box">
+        <div class="label">Явка на конец периода</div>
+        <div class="value">
+          {{#if turnout}}{{turnout}}{{#if registeredVoters}} из {{registeredVoters}} ({{turnoutPercent}}%){{/if}}{{else}}нет данных{{/if}}
+        </div>
+      </div>
+    </div>
+
+    <div class="charts">
+      {{{charts.partyChart}}}
+      {{{charts.singleChart}}}
+      {{{charts.invalidCancelledChart}}}
+      {{{charts.turnoutChart}}}
+    </div>
+
+    <h3>Формальные статистические сигналы</h3>
+    {{#if signals.length}}
+    <ul class="signal-list">
+      {{#each signals}}
+      <li>
+        <strong>{{id}}</strong> — {{subject}}: скачок {{delta}} за интервал {{dt from}}–{{dt to}}
+        (медиана {{medianDelta}}, MAD {{mad}}, robust z = {{robustZ}})
+      </li>
+      {{/each}}
+    </ul>
+    {{else}}
+    <p class="empty">Статистически значимых отклонений не обнаружено.</p>
+    {{/if}}
+
+    <h2>2. Интерпретация и проверяемые гипотезы</h2>
+    <div class="summary-block">{{summary}}</div>
+
+    {{#if hypotheses.length}}
+      {{#each hypotheses}}
+      <div class="hypothesis">
+        <h3>{{title}} <span class="confidence confidence-{{confidence}}">{{confidence}}</span></h3>
+        <p>{{assessment}}</p>
+        {{#if evidence.length}}
+        <div><strong>Аргументы:</strong></div>
+        <ul class="evidence-list">
+          {{#each evidence}}<li>[{{sourceId}}] {{argument}}</li>{{/each}}
+        </ul>
+        {{/if}}
+        {{#if alternativeExplanations.length}}
+        <div><strong>Альтернативные объяснения:</strong></div>
+        <ul class="alt-list">
+          {{#each alternativeExplanations}}<li>{{this}}</li>{{/each}}
+        </ul>
+        {{/if}}
+        {{#if verificationSteps.length}}
+        <div><strong>Что проверить:</strong></div>
+        <ul class="verify-list">
+          {{#each verificationSteps}}<li>{{this}}</li>{{/each}}
+        </ul>
+        {{/if}}
+      </div>
+      {{/each}}
+    {{else}}
+    <p class="empty">Гипотез не сформировано — недостаточно данных или сигналов для содержательной интерпретации.</p>
+    {{/if}}
+
+    {{#if unresolvedQuestions.length}}
+    <h3>Открытые вопросы</h3>
+    <ul class="verify-list">
+      {{#each unresolvedQuestions}}<li>{{this}}</li>{{/each}}
+    </ul>
+    {{/if}}
+
+    <p class="disclaimer">
+      Аномалия статистики не является доказательством нарушения. Гипотезы выше — предмет проверки, а не утверждение о фальсификации.
+    </p>
+
+    <h2>3. Источники</h2>
+    {{#if usedSources.length}}
+    <table class="sources-table">
+      <thead><tr><th>ID</th><th>Тип</th><th>Время</th><th>Автор</th><th>Содержание</th></tr></thead>
+      <tbody>
+        {{#each usedSources}}
+        <tr>
+          <td>{{sourceId}}</td>
+          <td>{{kind}}</td>
+          <td>{{dt at}}</td>
+          <td>{{#if username}}@{{username}}{{else}}—{{/if}}</td>
+          <td>{{label}}</td>
+        </tr>
+        {{/each}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">В разделе 2 не использовано ни одной прямой ссылки на источник.</p>
+    {{/if}}
+  </section>
+  {{/each}}
+
+</body>
+</html>

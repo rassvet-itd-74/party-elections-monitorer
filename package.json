@@ -1,0 +1,28 @@
+{
+  "name": "party-elections-monitorer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GosDoomMonitorer — Telegram-бот для сбора наблюдений по УИК и генерации PDF-отчётов",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --env-file=.env dist/index.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "register-webhook": "node --env-file=.env dist/registerWebhook.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "handlebars": "^4.7.8",
+    "openai": "^4.63.0",
+    "playwright": "^1.48.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4"
+  }
+}
