@@ -317,6 +317,8 @@ async function flushDatabase() {
 
 Открыть созданную роль → **Add permissions → Attach policies** → найти и подключить `AWSLambdaBasicExecutionRole` (даёт только запись логов в CloudWatch, больше ничего).
 
+// Созданная дефолтная роль: ``observer-bot-role-vs22wvc4``
+
 Там же → **Add permissions → Create inline policy** → вкладка **JSON** → вставить, подставив свой `<region>` и `<account-id>` (видны в правом верхнем углу консоли):
 ```json
 {
