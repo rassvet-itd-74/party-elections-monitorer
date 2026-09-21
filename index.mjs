@@ -81,6 +81,12 @@ async function sendMessage(text) {
   }
 }
 
+async function sendPrivateMessage(chatId, text) {
+  for (const chunk of splitMessage(text, TELEGRAM_MESSAGE_LIMIT)) {
+    await callApi("sendMessage", { chat_id: chatId, text: chunk, parse_mode: "HTML" });
+  }
+}
+
 // Пакует блоки текста в сообщения по лимиту, не разрывая отдельный блок
 // (используется для гипотез — «по одной гипотезе на сообщение при переполнении»).
 async function sendBlocksPacked(blocks) {
@@ -733,6 +739,27 @@ async function handleReport(message, args) {
   }
 }
 
+async function handleInsert(message, text) {
+  if (message.from.id !== ADMIN_ID) return; // не отвечать вообще, если вызывает не админ
+
+  const firstWhitespace = text.search(/\s/);
+  const command = (firstWhitespace === -1 ? text : text.slice(0, firstWhitespace)).split("@")[0];
+  if (command !== "/insert") return;
+
+  const args = firstWhitespace === -1 ? "" : text.slice(firstWhitespace + 1).trimStart();
+  const argsFirstWhitespace = args.search(/\s/);
+  const uik = Number((argsFirstWhitespace === -1 ? args : args.slice(0, argsFirstWhitespace)).trim());
+  const bodyText = argsFirstWhitespace === -1 ? "" : args.slice(argsFirstWhitespace + 1).trimStart();
+
+  if (!Number.isInteger(uik) || uik <= 0 || !bodyText) {
+    await sendPrivateMessage(message.chat.id, "Использование:\n/insert 1245\n<текст наблюдения>");
+    return;
+  }
+
+  await addObservation(uik, message.from.id, message.from.username ?? null, bodyText, message.message_id, message.date * 1000);
+  await sendPrivateMessage(message.chat.id, `Добавлено наблюдение по УИК ${uik}.`);
+}
+
 async function handleFlush(message, args) {
   if (message.from.id !== ADMIN_ID) return; // не отвечать вообще, если вызывает не админ
 
@@ -748,8 +775,14 @@ async function handleFlush(message, args) {
 export async function routeUpdate(update) {
   const message = update.message;
   if (!message) return;
-  if (message.chat?.id !== TARGET_CHAT_ID || message.message_thread_id !== TARGET_THREAD_ID) return;
   if (!message.from) return;
+
+  if (message.chat?.type === "private") {
+    await handleInsert(message, message.text ?? "");
+    return;
+  }
+
+  if (message.chat?.id !== TARGET_CHAT_ID || message.message_thread_id !== TARGET_THREAD_ID) return;
 
   await upsertUser(message.from.id, message.from.username ?? null, message.from.first_name ?? null, Date.now());
 
