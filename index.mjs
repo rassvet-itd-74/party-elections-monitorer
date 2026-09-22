@@ -87,32 +87,11 @@ async function sendPrivateMessage(chatId, text) {
   }
 }
 
-// Пакует блоки текста в сообщения по лимиту, не разрывая отдельный блок
-// (используется для гипотез — «по одной гипотезе на сообщение при переполнении»).
-async function sendBlocksPacked(blocks) {
-  let buffer = "";
-  for (const block of blocks) {
-    const candidate = buffer ? `${buffer}\n\n${block}` : block;
-    if (candidate.length <= TELEGRAM_MESSAGE_LIMIT) {
-      buffer = candidate;
-      continue;
-    }
-    if (buffer) await sendMessage(buffer);
-    if (block.length <= TELEGRAM_MESSAGE_LIMIT) {
-      buffer = block;
-    } else {
-      for (const chunk of splitMessage(block, TELEGRAM_MESSAGE_LIMIT)) await sendMessage(chunk);
-      buffer = "";
-    }
-  }
-  if (buffer) await sendMessage(buffer);
-}
-
-async function sendDocument(csvText, filename) {
+async function sendDocument(content, filename) {
   const form = new FormData();
   form.append("chat_id", String(TARGET_CHAT_ID));
   form.append("message_thread_id", String(TARGET_THREAD_ID));
-  form.append("document", new Blob([csvText], { type: "text/csv" }), filename);
+  form.append("document", new Blob([content], { type: "text/markdown" }), filename);
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`, {
     method: "POST",
     body: form,
@@ -244,24 +223,22 @@ async function releaseLock(key) {
   await ddb.send(new DeleteCommand({ TableName: TABLES.locks, Key: { key } }));
 }
 
-// ==== CSV ====
-
-function csvEscape(value) {
-  const str = String(value);
-  if (/[",\n]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
-  return str;
-}
+// ==== markdown-таблица ====
 
 function toIso(ms) {
   return new Date(ms).toISOString();
 }
 
+function mdCell(value) {
+  return String(value).replace(/\|/g, "\\|");
+}
+
 // Одна строка на УИК — таблица, готовая для гистограммы: номер УИК, погашенные,
 // недействительные, явка, затем по одной колонке на каждую партию и каждого
 // одномандатного кандидата, встретившихся хотя бы у одного УИК из отчёта.
-function histogramToCsv(targetUiks, valuesByUik, partyNames, candidateNames) {
-  const header = ["uik", "cancelled", "invalid", "turnout", ...partyNames, ...candidateNames];
-  const lines = [header.map(csvEscape).join(",")];
+function histogramToMarkdownTable(targetUiks, valuesByUik, partyNames, candidateNames) {
+  const header = ["УИК", "Погашенные", "Недействительные", "Явка", ...partyNames, ...candidateNames];
+  const lines = [`| ${header.map(mdCell).join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`];
   for (const uik of targetUiks) {
     const v = valuesByUik.get(uik);
     const row = [
@@ -272,7 +249,7 @@ function histogramToCsv(targetUiks, valuesByUik, partyNames, candidateNames) {
       ...partyNames.map((name) => v.parties[name] ?? ""),
       ...candidateNames.map((name) => v.candidates[name] ?? ""),
     ];
-    lines.push(row.map(csvEscape).join(","));
+    lines.push(`| ${row.map(mdCell).join(" | ")} |`);
   }
   return lines.join("\n");
 }
@@ -479,91 +456,125 @@ function sanitizeAnalysis(analysis, knownSourceIds) {
 
 // ==== сборка и отправка отчёта ====
 
+// Сноски нумеруются сквозным счётчиком на весь отчёт, а не в пределах одного УИК —
+// sourceId ("O-1", "O-2", …) уникален только внутри своего УИК, поэтому ключом
+// служит пара (uik, sourceId). Сами цитаты наблюдений уходят в конец отчёта одним
+// списком, а в тексте по ходу разбора остаются только компактные номера [n].
+function createRefRegistry() {
+  const byKey = new Map();
+  const list = [];
+  return {
+    cite(uik, sourceId, sourceById) {
+      const key = `${uik}:${sourceId}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, list.length + 1);
+        list.push({ number: list.length + 1, uik, source: sourceById.get(sourceId) });
+      }
+      return byKey.get(key);
+    },
+    list,
+  };
+}
+
 // Цифры теперь не вводятся командами, а вычленяются ИИ из текста наблюдений —
 // поэтому у каждой обязательно указываем sourceId, чтобы её можно было сверить
 // с исходным сообщением, а не просто поверить модели на слово.
-function formatSourceRefs(evidence) {
-  return evidence?.length ? ` [${evidence.map(escapeHtml).join(", ")}]` : "";
+function formatSourceRefsMd(evidence, uik, sourceById, refs) {
+  if (!evidence?.length) return "";
+  const numbers = evidence.map((id) => refs.cite(uik, id, sourceById));
+  return ` [${numbers.join(", ")}]`;
 }
 
-function formatScalarLine(label, scalar) {
+function formatScalarLineMd(label, scalar, uik, sourceById, refs) {
   if (!scalar) return `${label}: нет данных`;
-  return `${label}: ${scalar.value}${formatSourceRefs(scalar.evidence)}`;
+  return `${label}: ${scalar.value}${formatSourceRefsMd(scalar.evidence, uik, sourceById, refs)}`;
 }
 
-function formatUikAnalysisText(uik, observations, extracted, sourceById) {
+function formatUikSectionMd(uik, observations, extracted, sourceById, refs) {
   const lines = [];
-  lines.push(`<b>УИК ${uik}</b>`);
+  lines.push(`## УИК ${uik}`);
   lines.push(`Наблюдений: ${observations.length}`);
-  lines.push(formatScalarLine("Погашенные", extracted.cancelled));
-  lines.push(formatScalarLine("Недействительные", extracted.invalid));
-  lines.push(formatScalarLine("Явка", extracted.turnout));
+  lines.push(formatScalarLineMd("Погашенные", extracted.cancelled, uik, sourceById, refs));
+  lines.push(formatScalarLineMd("Недействительные", extracted.invalid, uik, sourceById, refs));
+  lines.push(formatScalarLineMd("Явка", extracted.turnout, uik, sourceById, refs));
 
   if (extracted.parties.length) {
     lines.push(
-      `Партии: ${extracted.parties.map((p) => `${escapeHtml(p.name)}: ${p.value}${formatSourceRefs(p.evidence)}`).join(", ")}`
+      `Партии: ${extracted.parties.map((p) => `${p.name}: ${p.value}${formatSourceRefsMd(p.evidence, uik, sourceById, refs)}`).join(", ")}`
     );
   }
 
   if (extracted.candidates.length) {
     lines.push(
-      `Кандидаты: ${extracted.candidates.map((c) => `${escapeHtml(c.name)}: ${c.value}${formatSourceRefs(c.evidence)}`).join(", ")}`
+      `Кандидаты: ${extracted.candidates.map((c) => `${c.name}: ${c.value}${formatSourceRefsMd(c.evidence, uik, sourceById, refs)}`).join(", ")}`
     );
-  }
-
-  const citedIds = new Set([
-    ...(extracted.cancelled?.evidence ?? []),
-    ...(extracted.invalid?.evidence ?? []),
-    ...(extracted.turnout?.evidence ?? []),
-    ...extracted.parties.flatMap((p) => p.evidence),
-    ...extracted.candidates.flatMap((c) => c.evidence),
-  ]);
-  if (citedIds.size) {
-    lines.push("Источники цифр:");
-    for (const id of citedIds) {
-      lines.push(`• [${escapeHtml(id)}] ${escapeHtml(describeSource(sourceById.get(id)))}`);
-    }
   }
 
   return lines.join("\n");
 }
 
-function formatHypothesis(h, index, sourceById) {
+function formatHypothesisMd(h, index, uik, sourceById, refs) {
   const lines = [];
-  lines.push(`<b>Гипотеза ${index + 1}: ${escapeHtml(h.title)}</b>`);
-  lines.push(escapeHtml(h.description));
-  lines.push(`Уверенность: ${escapeHtml(h.confidence)}`);
+  lines.push(`### Гипотеза ${index + 1}: ${h.title}`);
+  lines.push(h.description);
+  lines.push(`Уверенность: ${h.confidence}`);
   if (h.alternativeExplanations?.length) {
     lines.push("Альтернативные объяснения:");
-    for (const alt of h.alternativeExplanations) lines.push(`• ${escapeHtml(alt)}`);
+    for (const alt of h.alternativeExplanations) lines.push(`- ${alt}`);
   }
   if (h.verificationSteps?.length) {
     lines.push("Как проверить:");
-    for (const step of h.verificationSteps) lines.push(`• ${escapeHtml(step)}`);
+    for (const step of h.verificationSteps) lines.push(`- ${step}`);
   }
   if (h.evidence?.length) {
     lines.push("Источники:");
     for (const e of h.evidence) {
-      const desc = escapeHtml(describeSource(sourceById.get(e.sourceId)));
-      const note = e.note ? ` — ${escapeHtml(e.note)}` : "";
-      lines.push(`• [${escapeHtml(e.sourceId)}] ${desc}${note}`);
+      const number = refs.cite(uik, e.sourceId, sourceById);
+      const note = e.note ? ` ${e.note}` : "";
+      lines.push(`- [${number}]${note}`);
     }
   }
   return lines.join("\n");
 }
 
-async function sendHypotheses(uik, analysis, sourceById) {
-  const intro = `<b>УИК ${uik}: интерпретация ИИ</b>\n${escapeHtml(analysis.summary)}`;
-  if (analysis.hypotheses.length === 0) {
-    await sendMessage(`${intro}\n\nГипотез не выдвинуто.`);
-    return;
-  }
-  await sendBlocksPacked([intro, ...analysis.hypotheses.map((h, i) => formatHypothesis(h, i, sourceById))]);
+function formatHypothesesSectionMd(uik, analysis, sourceById, refs) {
+  const intro = `### УИК ${uik}: интерпретация ИИ\n${analysis.summary}`;
+  if (analysis.hypotheses.length === 0) return `${intro}\n\nГипотез не выдвинуто.`;
+  return [intro, ...analysis.hypotheses.map((h, i) => formatHypothesisMd(h, i, uik, sourceById, refs))].join("\n\n");
 }
 
-// Таблица строится уже после того, как ИИ отработал по каждому УИК — цифры
-// в CSV теперь не введены наблюдателем напрямую, а извлечены моделью из текста,
-// поэтому сперва нужен результат анализа, и только потом из него собирается CSV.
+// Список процитированных наблюдений — единый на весь отчёт, в порядке первого
+// упоминания сноски по тексту, а не сгруппированный по УИК или по разделу.
+function formatReferencesSectionMd(refs) {
+  if (!refs.list.length) return "## Источники\n\nНичего не процитировано.";
+  const lines = ["## Источники", ""];
+  for (const { number, uik, source } of refs.list) {
+    lines.push(`${number}. [УИК ${uik}] ${describeSource(source)}`);
+  }
+  return lines.join("\n");
+}
+
+function buildReportMarkdown(targetUiks, perUik, valuesByUik, partyNames, candidateNames) {
+  const refs = createRefRegistry();
+  const sections = [
+    "# Отчёт наблюдателей",
+    `УИК в отчёте: ${targetUiks.join(", ")}`,
+    "",
+    histogramToMarkdownTable(targetUiks, valuesByUik, partyNames, candidateNames),
+  ];
+  for (const uik of targetUiks) {
+    const { observations, sourceById, analysis } = perUik.get(uik);
+    sections.push("", formatUikSectionMd(uik, observations, analysis.extracted, sourceById, refs));
+    sections.push("", formatHypothesesSectionMd(uik, analysis, sourceById, refs));
+  }
+  sections.push("", formatReferencesSectionMd(refs));
+  return sections.join("\n");
+}
+
+// Отчёт строится уже после того, как ИИ отработал по каждому УИК — цифры
+// в markdown-файле теперь не введены наблюдателем напрямую, а извлечены моделью
+// из текста, поэтому сперва нужен результат анализа, и только потом из него
+// собирается итоговый документ.
 async function runReport(targetUiks) {
   const perUik = new Map();
   await Promise.all(
@@ -584,14 +595,8 @@ async function runReport(targetUiks) {
   const partyNames = [...new Set(targetUiks.flatMap((uik) => Object.keys(valuesByUik.get(uik).parties)))].sort();
   const candidateNames = [...new Set(targetUiks.flatMap((uik) => Object.keys(valuesByUik.get(uik).candidates)))].sort();
 
-  await sendMessage(`<b>Отчёт наблюдателей</b>\nУИК в отчёте: ${targetUiks.join(", ")}`);
-  await sendDocument(histogramToCsv(targetUiks, valuesByUik, partyNames, candidateNames), "uik-report.csv");
-
-  for (const uik of targetUiks) {
-    const { observations, sourceById, analysis } = perUik.get(uik);
-    await sendMessage(formatUikAnalysisText(uik, observations, analysis.extracted, sourceById));
-    await sendHypotheses(uik, analysis, sourceById);
-  }
+  const markdown = buildReportMarkdown(targetUiks, perUik, valuesByUik, partyNames, candidateNames);
+  await sendDocument(markdown, "uik-report.md");
 }
 
 // ==== /flush ====
