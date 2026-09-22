@@ -233,27 +233,6 @@ function mdCell(value) {
   return String(value).replace(/\|/g, "\\|");
 }
 
-// Одна строка на УИК — таблица, готовая для гистограммы: номер УИК, погашенные,
-// недействительные, явка, затем по одной колонке на каждую партию и каждого
-// одномандатного кандидата, встретившихся хотя бы у одного УИК из отчёта.
-function histogramToMarkdownTable(targetUiks, valuesByUik, partyNames, candidateNames) {
-  const header = ["УИК", "Погашенные", "Недействительные", "Явка", ...partyNames, ...candidateNames];
-  const lines = [`| ${header.map(mdCell).join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`];
-  for (const uik of targetUiks) {
-    const v = valuesByUik.get(uik);
-    const row = [
-      uik,
-      v.cancelled ?? "",
-      v.invalid ?? "",
-      v.turnout ?? "",
-      ...partyNames.map((name) => v.parties[name] ?? ""),
-      ...candidateNames.map((name) => v.candidates[name] ?? ""),
-    ];
-    lines.push(`| ${row.map(mdCell).join(" | ")} |`);
-  }
-  return lines.join("\n");
-}
-
 // ==== OpenAI + промпт + валидация sourceId ====
 
 const ANALYSIS_PROMPT = `Ты — аналитик-ассистент группы наблюдателей за выборами по одному избирательному участку (УИК).
@@ -432,17 +411,6 @@ function sanitizeExtracted(extracted, knownSourceIds) {
   };
 }
 
-// Сплющивает извлечённые значения (с evidence) в форму, пригодную для CSV-таблицы.
-function flattenExtracted(extracted) {
-  return {
-    parties: Object.fromEntries(extracted.parties.map((p) => [p.name, p.value])),
-    candidates: Object.fromEntries(extracted.candidates.map((c) => [c.name, c.value])),
-    invalid: extracted.invalid?.value ?? null,
-    cancelled: extracted.cancelled?.value ?? null,
-    turnout: extracted.turnout?.value ?? null,
-  };
-}
-
 function sanitizeAnalysis(analysis, knownSourceIds) {
   const hypotheses = (analysis.hypotheses ?? [])
     .map((h) => ({ ...h, evidence: (h.evidence ?? []).filter((e) => knownSourceIds.has(e.sourceId)) }))
@@ -485,31 +453,29 @@ function formatSourceRefsMd(evidence, uik, sourceById, refs) {
   return ` [${numbers.join(", ")}]`;
 }
 
-function formatScalarLineMd(label, scalar, uik, sourceById, refs) {
-  if (!scalar) return `${label}: нет данных`;
-  return `${label}: ${scalar.value}${formatSourceRefsMd(scalar.evidence, uik, sourceById, refs)}`;
+function formatScalarValueMd(scalar, uik, sourceById, refs) {
+  if (!scalar) return "нет данных";
+  return `${scalar.value}${formatSourceRefsMd(scalar.evidence, uik, sourceById, refs)}`;
 }
 
+// Таблица своя на каждый УИК — только его показатели, без разреженных колонок
+// на партии/кандидатов из чужих участков.
 function formatUikSectionMd(uik, observations, extracted, sourceById, refs) {
   const lines = [];
   lines.push(`## УИК ${uik}`);
   lines.push(`Наблюдений: ${observations.length}`);
-  lines.push(formatScalarLineMd("Погашенные", extracted.cancelled, uik, sourceById, refs));
-  lines.push(formatScalarLineMd("Недействительные", extracted.invalid, uik, sourceById, refs));
-  lines.push(formatScalarLineMd("Явка", extracted.turnout, uik, sourceById, refs));
-
-  if (extracted.parties.length) {
-    lines.push(
-      `Партии: ${extracted.parties.map((p) => `${p.name}: ${p.value}${formatSourceRefsMd(p.evidence, uik, sourceById, refs)}`).join(", ")}`
-    );
+  lines.push("");
+  lines.push("| Показатель | Значение |");
+  lines.push("| --- | --- |");
+  lines.push(`| Погашенные | ${mdCell(formatScalarValueMd(extracted.cancelled, uik, sourceById, refs))} |`);
+  lines.push(`| Недействительные | ${mdCell(formatScalarValueMd(extracted.invalid, uik, sourceById, refs))} |`);
+  lines.push(`| Явка | ${mdCell(formatScalarValueMd(extracted.turnout, uik, sourceById, refs))} |`);
+  for (const p of extracted.parties) {
+    lines.push(`| ${mdCell(p.name)} | ${mdCell(`${p.value}${formatSourceRefsMd(p.evidence, uik, sourceById, refs)}`)} |`);
   }
-
-  if (extracted.candidates.length) {
-    lines.push(
-      `Кандидаты: ${extracted.candidates.map((c) => `${c.name}: ${c.value}${formatSourceRefsMd(c.evidence, uik, sourceById, refs)}`).join(", ")}`
-    );
+  for (const c of extracted.candidates) {
+    lines.push(`| ${mdCell(c.name)} | ${mdCell(`${c.value}${formatSourceRefsMd(c.evidence, uik, sourceById, refs)}`)} |`);
   }
-
   return lines.join("\n");
 }
 
@@ -554,14 +520,9 @@ function formatReferencesSectionMd(refs) {
   return lines.join("\n");
 }
 
-function buildReportMarkdown(targetUiks, perUik, valuesByUik, partyNames, candidateNames) {
+function buildReportMarkdown(targetUiks, perUik) {
   const refs = createRefRegistry();
-  const sections = [
-    "# Отчёт наблюдателей",
-    `УИК в отчёте: ${targetUiks.join(", ")}`,
-    "",
-    histogramToMarkdownTable(targetUiks, valuesByUik, partyNames, candidateNames),
-  ];
+  const sections = ["# Отчёт наблюдателей", `УИК в отчёте: ${targetUiks.join(", ")}`];
   for (const uik of targetUiks) {
     const { observations, sourceById, analysis } = perUik.get(uik);
     sections.push("", formatUikSectionMd(uik, observations, analysis.extracted, sourceById, refs));
@@ -588,14 +549,7 @@ async function runReport(targetUiks) {
     })
   );
 
-  const valuesByUik = new Map(
-    targetUiks.map((uik) => [uik, flattenExtracted(perUik.get(uik).analysis.extracted)])
-  );
-
-  const partyNames = [...new Set(targetUiks.flatMap((uik) => Object.keys(valuesByUik.get(uik).parties)))].sort();
-  const candidateNames = [...new Set(targetUiks.flatMap((uik) => Object.keys(valuesByUik.get(uik).candidates)))].sort();
-
-  const markdown = buildReportMarkdown(targetUiks, perUik, valuesByUik, partyNames, candidateNames);
+  const markdown = buildReportMarkdown(targetUiks, perUik);
   await sendDocument(markdown, "uik-report.md");
 }
 
